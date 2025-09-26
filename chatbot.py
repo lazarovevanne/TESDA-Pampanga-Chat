@@ -1,145 +1,233 @@
+# streamlit_rag_chatbot.py
+# Simple RAG (Retrieval-Augmented Generation) chatbot built with Streamlit + OpenAI.
+# Features:
+# - Upload your own PDF or TXT files
+# - Automatic text extraction + chunking
+# - Create embeddings using OpenAI Embeddings
+# - Very small in-memory vector store (no external DB required)
+# - Retrieve top-k chunks and build a context to send to the LLM
+# - Minimal, easy-to-run single-file Streamlit app
+
 import streamlit as st
-import time
+import openai
+import numpy as np
+from typing import List, Dict, Tuple
+import os
+from pypdf import PdfReader
+import tempfile
 
-# --------------------------
-# Simple rule-based chatbot function
-# --------------------------
-def chatbot_response(user_message: str) -> str:
-    user_message = (user_message or "").strip()
+# -----------------------------
+# Helper functions
+# -----------------------------
 
-    if user_message in ["hi", "hello", "hey", "start"]:
-        return "👋 Hello! How can I help you today?"
-
-    elif "Available CBT Programs" in user_message or user_message == "available cbt programs":
-    	return '📦 You can See available Community Based-Trainings here: <a href="https://docs.google.com/spreadsheets/d/e/2PACX-1vSFbhD901AR_TCRJ__OcfOBR-I6hBphNo4ai1Djy_e9VPeAYMBba-E8TnPLE91jNeyeewG-VrPdAfns/pubhtml" target="_blank">Available CBT Programs</a>'
-
-    elif "Requirements" in user_message or user_message == "Requirements":
-        return "📝 Here are the requirements for the application for Community Based Training."
-
-    elif "talk to agent" in user_message or user_message == "Register":
-        return '📝 To Register Kindly click this link:<a href="https://docs.google.com/forms/d/e/1FAIpQLSfMMWs-PyeHqGMyQBp9DvhqCZBZyEkPjKsbUrSk6sut_4OPRw/viewform?usp=dialog" target="_blank">CBT Registration Form</a>'
-
-    else:
-        return "❓ Sorry, I didn’t understand that. Please choose an option below or type 'help'."
-
-# --------------------------
-# Page config and session
-# --------------------------
-st.set_page_config(page_title="Simple Chatbot", page_icon="🤖", layout="wide")
-
-if "messages" not in st.session_state:
-    # messages is a list of tuples: (role, text)
-    st.session_state.messages = [("Bot", "👋 Hi! Welcome to TESDA Chatbot. Type 'help' to see options.")]
-
-# last_action will hold a quick-action command when a button is clicked
-if "last_action" not in st.session_state:
-    st.session_state.last_action = None
-
-# --------------------------
-# Sidebar info + reset
-# --------------------------
-with st.sidebar:
-    st.title("ℹ️ About this Chatbot")
-    st.write("This is a simple **rule-based chatbot** built with Streamlit. You can:")
-    st.markdown("""
-    - 👋 Greet the bot  
-    - 📝 Create an account  
-    - 📦 View courses  
-    - 📞 Talk to a human agent  
-    """)
-    if st.button("🔄 Reset Chat"):
-        st.session_state.messages = [("Bot", "👋 Hi! Welcome to TESDA Chatbot. Type 'help' to see options.")]
-        st.session_state.last_action = None
-        st.experimental_rerun()
-
-# --------------------------
-# Top title
-# --------------------------
-st.markdown("<h1 style='text-align: center; color: #4CAF50;'>🤖 Rule-Based Chatbot</h1>", unsafe_allow_html=True)
-st.write("Interact with the chatbot by typing or using quick action buttons below.")
-
-# --------------------------
-# Quick action buttons (safe pattern)
-# --------------------------
-col1, col2, col3 = st.columns(3)
-if col1.button("📝 Available CBT Programs"):
-    st.session_state.last_action = "Available CBT Programs"
-if col2.button("📦 Requirements"):
-    st.session_state.last_action = "Requirements"
-if col3.button("📝 Register"):
-    st.session_state.last_action = "Register"
-
-# --------------------------
-# Determine user_input:
-# - priority: last_action (button) -> chat_input (if available) -> text_input fallback
-# --------------------------
-user_input = None
-
-# If a button was clicked (last_action set), consume it exactly once
-if st.session_state.last_action:
-    user_input = st.session_state.last_action
-    # clear it immediately so it won't repeat on next run
-    st.session_state.last_action = None
-
-# Try to use chat_input (Streamlit >= 1.25). If not available, fall back to text_input.
-try:
-    # chat_input returns a value only when user submits
-    if user_input is None:
-        chat_in = st.chat_input("Type your message here...")
-        if chat_in:
-            user_input = chat_in
-except Exception:
-    # fallback to text_input with a session_state key so we can clear it after processing
-    if user_input is None:
-        # use a session key so we can reset it safely
-        if "typed_value" not in st.session_state:
-            st.session_state.typed_value = ""
-        typed = st.text_input("Type your message here:", value=st.session_state.typed_value, key="typed_value")
-        # Only process if not empty and not same as last processed (to avoid reprocessing)
-        if typed and (len(st.session_state.messages) == 0 or st.session_state.messages[-1] != ("You", typed)):
-            user_input = typed
-
-# --------------------------
-# Process a single user_input (if any)
-# --------------------------
-if user_input:
-    # Append user message
-    st.session_state.messages.append(("You", user_input))
-
-    # Simulate typing effect (non-blocking visual)
-    with st.spinner("Bot is typing..."):
-        time.sleep(0.9)
-
-    # Get bot reply
+def extract_text_from_pdf(file) -> str:
     try:
-        bot_reply = chatbot_response(user_input)
+        reader = PdfReader(file)
+        text = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            text.append(page_text)
+        return "\n\n".join(text)
     except Exception as e:
-        bot_reply = f"⚠️ An internal error occurred while generating a reply: {e}"
+        return ""
 
-    st.session_state.messages.append(("Bot", bot_reply))
 
-    # If using the text_input fallback, clear stored value after processing
-    if "typed_value" in st.session_state:
-        st.session_state.typed_value = ""
+def read_text_file(file) -> str:
+    try:
+        raw = file.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        return raw
+    except Exception:
+        return ""
 
-# --------------------------
-# Display conversation safely
-# --------------------------
-for entry in st.session_state.messages:
-    # defensive check to avoid unpacking errors
-    if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
-        # skip malformed entries
-        continue
-    role, msg = entry
-    if role == "You":
-        st.markdown(
-            f"<div style='background-color:#DCF8C6; padding:10px; border-radius:15px; margin:5px; text-align:right;'>"
-            f"🧑 <b>{role}:</b> {msg}</div>",
-            unsafe_allow_html=True,
-        )
+
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    # Simple character-based chunker
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    text_len = len(text)
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunk = text[start:end]
+        chunks.append(chunk.strip())
+        start += chunk_size - overlap
+    return chunks
+
+
+def get_embeddings(openai_client, texts: List[str], model: str = "text-embedding-3-small") -> List[List[float]]:
+    # Batch call to OpenAI embeddings
+    embeddings = []
+    # The OpenAI Python library accepts list input and returns data for each
+    resp = openai_client.Embedding.create(model=model, input=texts)
+    for item in resp.data:
+        embeddings.append(item.embedding)
+    return embeddings
+
+
+def normalize(v: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(v)
+    return v / (norm + 1e-10)
+
+
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b))
+
+
+def retrieve_top_k(query_embedding: List[float], store: List[Dict], k: int = 3) -> List[Dict]:
+    if not store:
+        return []
+    q = normalize(np.array(query_embedding))
+    scores = []
+    for item in store:
+        vec = np.array(item["embedding"])
+        vec = normalize(vec)
+        score = cosine_sim(q, vec)
+        scores.append(score)
+    idxs = np.argsort(scores)[::-1][:k]
+    results = [store[i] for i in idxs]
+    for i, r in enumerate(results):
+        r["score"] = float(scores[idxs[i]])
+    return results
+
+# -----------------------------
+# Streamlit app
+# -----------------------------
+
+st.set_page_config(page_title="Simple RAG Chatbot", layout="wide")
+st.title("📚 Simple RAG Chatbot — Streamlit + OpenAI")
+
+# API key input
+if "openai_api_key" not in st.session_state:
+    st.session_state.openai_api_key = ""
+
+with st.sidebar:
+    st.header("Configuration")
+    api_key = st.text_input("OpenAI API key", type="password", value=st.session_state.openai_api_key)
+    if api_key:
+        st.session_state.openai_api_key = api_key
+
+    embedding_model = st.selectbox("Embedding model", options=["text-embedding-3-small", "text-embedding-3-large"], index=0)
+    chat_model = st.selectbox("Chat model", options=["gpt-3.5-turbo", "gpt-4o-mini"], index=0)
+    top_k = st.number_input("Top K retrieved chunks", min_value=1, max_value=10, value=3)
+    chunk_size = st.number_input("Chunk size (chars)", min_value=200, max_value=4000, value=1000, step=100)
+    chunk_overlap = st.number_input("Chunk overlap (chars)", min_value=0, max_value=2000, value=200, step=50)
+
+st.markdown("Upload PDF or TXT files (you can upload multiple). The app will index them in memory.")
+uploaded_files = st.file_uploader("Upload PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True)
+
+if "store" not in st.session_state:
+    # store will be a list of dicts: {"content":..., "metadata":{...}, "embedding":[...]}
+    st.session_state.store = []
+
+# Indexing step
+if uploaded_files:
+    if not st.session_state.openai_api_key:
+        st.warning("Please set your OpenAI API key in the sidebar before uploading files.")
     else:
-        st.markdown(
-            f"<div style='background-color:#E6E6FA; padding:10px; border-radius:15px; margin:5px; text-align:left;'>"
-            f"🤖 <b>{role}:</b> {msg}</div>",
-            unsafe_allow_html=True,
+        # Initialize openai client
+        openai.api_key = st.session_state.openai_api_key
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        total_files = len(uploaded_files)
+        file_idx = 0
+        new_chunks = []
+        new_metadatas = []
+        for f in uploaded_files:
+            file_idx += 1
+            progress_text.text(f"Processing {f.name} ({file_idx}/{total_files})")
+            if f.type == "application/pdf" or f.name.lower().endswith('.pdf'):
+                text = extract_text_from_pdf(f)
+            else:
+                text = read_text_file(f)
+
+            chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+            for i, c in enumerate(chunks):
+                new_chunks.append(c)
+                new_metadatas.append({"source": f.name, "chunk_index": i})
+            progress_bar.progress(int(file_idx / total_files * 100))
+
+        if new_chunks:
+            # create embeddings in batches (we simply send all at once here; for very large uploads, batching is recommended)
+            with st.spinner("Creating embeddings..."):
+                embeddings = get_embeddings(openai, new_chunks, model=embedding_model)
+
+            # add to store
+            for txt, meta, emb in zip(new_chunks, new_metadatas, embeddings):
+                st.session_state.store.append({"content": txt, "metadata": meta, "embedding": emb})
+
+            st.success(f"Indexed {len(new_chunks)} chunks from {total_files} file(s).")
+        else:
+            st.info("No text found in the uploaded files.")
+
+# Chat UI
+st.subheader("Ask questions about the uploaded documents")
+col1, col2 = st.columns([3, 1])
+with col1:
+    user_question = st.text_area("Your question", height=120)
+    ask_button = st.button("Ask")
+with col2:
+    st.write("\n")
+    if st.session_state.store:
+        st.write(f"Indexed chunks: {len(st.session_state.store)}")
+        # show sample sources
+        sources = {}
+        for item in st.session_state.store:
+            src = item["metadata"]["source"]
+            sources[src] = sources.get(src, 0) + 1
+        st.write("**Sources:**")
+        for s, c in sources.items():
+            st.write(f"- {s}: {c} chunks")
+
+if ask_button:
+    if not st.session_state.openai_api_key:
+        st.warning("Set your OpenAI API key in the sidebar first.")
+    elif not user_question:
+        st.warning("Please type a question.")
+    elif not st.session_state.store:
+        st.warning("No indexed documents found. Upload files first.")
+    else:
+        openai.api_key = st.session_state.openai_api_key
+        with st.spinner("Retrieving..."):
+            q_emb = get_embeddings(openai, [user_question], model=embedding_model)[0]
+            top_chunks = retrieve_top_k(q_emb, st.session_state.store, k=int(top_k))
+
+        # Build context
+        context = "\n\n".join([f"Source: {c['metadata']['source']} (chunk {c['metadata']['chunk_index']})\n{c['content']}" for c in top_chunks])
+
+        system_prompt = (
+            "You are a helpful assistant. Use the provided CONTEXT to answer the user question. "
+            "If the answer is not contained in the context, say you don't know and avoid hallucination. "
+            "Cite the source filename and chunk index when referencing the document."
         )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"CONTEXT:\n{context}\n---\nQUESTION:\n{user_question}"},
+        ]
+
+        with st.spinner("Generating answer from the LLM..."):
+            try:
+                resp = openai.ChatCompletion.create(model=st.session_state.get('chat_model', chat_model), messages=messages, max_tokens=512, temperature=0.0)
+                answer = resp.choices[0].message.content
+            except Exception as e:
+                st.error(f"OpenAI API error: {e}")
+                answer = None
+
+        if answer:
+            st.markdown("### Answer")
+            st.write(answer)
+
+            st.markdown("---")
+            st.markdown("### Retrieved snippets (ranked)")
+            for i, c in enumerate(top_chunks, start=1):
+                st.write(f"**{i}. Source:** {c['metadata']['source']} (chunk {c['metadata']['chunk_index']}) — score: {c.get('score', 0):.4f}")
+                st.write(c['content'][:1000] + ("..." if len(c['content']) > 1000 else ""))
+
+# Persisting minimal state instructions
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Notes**:\n- This app uses a tiny in-memory vector store. It's not persistent across sessions.\n- For production, use a vector DB (Chroma, Pinecone, Weaviate) and batching for embeddings.\n- Keep your API key safe.")
+
+
